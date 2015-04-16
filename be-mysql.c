@@ -38,6 +38,8 @@
 #include "hash.h"
 #include "backends.h"
 
+#define NAMELEN	128
+
 struct mysql_backend {
         MYSQL *mysql;
 	char *host;
@@ -166,34 +168,77 @@ static bool auto_connect(struct mysql_backend *conf)
     return false;
 }
 
+
+#define SEPARATOR	"|"
+
+static int splitname(const char *fullname, char **user, char **device)
+{
+        char *p, *s, *save;
+        int rc = 1;
+
+        save = s = strdup(fullname);
+
+        if ((p = strsep(&s, SEPARATOR)) == NULL)
+                goto out;
+        *user = strdup(p);
+
+        if ((p = strsep(&s, SEPARATOR)) == NULL)
+                goto out;
+        *device = strdup(p);
+
+        rc = 0;
+
+     out:
+        free(save);
+        return rc;
+}
+
 char *be_mysql_getuser(void *handle, const char *username, const char *password, int *authenticated)
 {
 	struct mysql_backend *conf = (struct mysql_backend *)handle;
-	char *query = NULL, *u = NULL, *value = NULL, *v;
-	long nrows, ulen;
+	char *query = NULL, *u = NULL, *d = NULL, *value = NULL, *v;
+	long nrows, ulen, dlen;
+	char *m_user = NULL, *m_device = NULL;
 	MYSQL_RES *res = NULL;
 	MYSQL_ROW rowdata;
 
 	if (!conf || !conf->userquery || !username || !*username)
 		return (NULL);
 
-    if (mysql_ping(conf->mysql)) {
-        fprintf(stderr, "%s\n", mysql_error(conf->mysql));
-        if (!auto_connect(conf)) {
-            return (NULL);
-        }
-    }
+	if (mysql_ping(conf->mysql)) {
+		fprintf(stderr, "%s\n", mysql_error(conf->mysql));
+		if (!auto_connect(conf)) {
+			return (NULL);
+		}
+	}
 
-	_log(LOG_DEBUG, "--FIXME username=%s, password=%s", username, password);
+	/*
+	 * Split username, which is "user|device" into individual fields.
+	 */
 
-	if ((u = escape(conf, username, &ulen)) == NULL)
+	if (splitname(username, &m_user, &m_device) != 0) {
+		_log(LOG_DEBUG, "Cannot split full username; return NULL");
+		return (NULL);
+	}
+
+	if (m_user == NULL || m_device == NULL || !strlen(m_user) || !strlen(m_device)) {
+		_log(LOG_DEBUG, "Either of username or device is empty; return NULL");
+		return (NULL);
+	}
+
+
+	_log(LOG_DEBUG, "--FIXME username=%s (u=[%s], d=[%s]), password=%s", username, m_user, m_device, password);
+
+	if ((u = escape(conf, m_user, &ulen)) == NULL)
+		return (NULL);
+	if ((d = escape(conf, m_device, &dlen)) == NULL)
 		return (NULL);
 
-	if ((query = malloc(strlen(conf->userquery) + ulen + 128)) == NULL) {
+	if ((query = malloc(strlen(conf->userquery) + ulen + dlen + 128)) == NULL) {
 		free(u);
 		return (NULL);
 	}
-	sprintf(query, conf->userquery, u);
+	sprintf(query, conf->userquery, u, d);
 	free(u);
 
 	_log(LOG_DEBUG, "SQL: %s", query);
@@ -247,12 +292,12 @@ int be_mysql_superuser(void *handle, const char *username)
 	if (!conf || !conf->superquery)
 		return (FALSE);
 
-    if (mysql_ping(conf->mysql)) {
-        fprintf(stderr, "%s\n", mysql_error(conf->mysql));
-        if (!auto_connect(conf)) {
-            return (FALSE);
-        }
-    }
+	if (mysql_ping(conf->mysql)) {
+		fprintf(stderr, "%s\n", mysql_error(conf->mysql));
+		if (!auto_connect(conf)) {
+			return (FALSE);
+		}
+	}
 
 	if ((u = escape(conf, username, &ulen)) == NULL)
 		return (FALSE);
