@@ -227,19 +227,20 @@ char *be_mysql_getuser(void *handle, const char *username, const char *password,
 	}
 
 
-	_log(LOG_DEBUG, "--FIXME username=%s (u=[%s], d=[%s]), password=%s", username, m_user, m_device, password);
+	_log(LOG_DEBUG, "--FIXME username=%s (u=[%s], d=[%s])", username, m_user, m_device);
 
-	if ((u = escape(conf, m_user, &ulen)) == NULL)
-		return (NULL);
-	if ((d = escape(conf, m_device, &dlen)) == NULL)
-		return (NULL);
+	if ((u = escape(conf, m_user, &ulen)) == NULL) {
+		goto out;
+	}
+	if ((d = escape(conf, m_device, &dlen)) == NULL) {
+		goto out;
+	}
 
 	if ((query = malloc(strlen(conf->userquery) + ulen + dlen + 128)) == NULL) {
-		free(u);
-		return (NULL);
+		goto out;
 	}
+
 	sprintf(query, conf->userquery, u, d);
-	free(u);
 
 	_log(LOG_DEBUG, "SQL: %s", query);
 
@@ -271,6 +272,10 @@ char *be_mysql_getuser(void *handle, const char *username, const char *password,
 
 	mysql_free_result(res);
 	free(query);
+	if (u) free(u);
+	if (d) free(d);
+	if (m_user) free(m_user);
+	if (m_device) free(m_device);
 
 	return (value);
 }
