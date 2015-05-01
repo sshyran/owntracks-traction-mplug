@@ -28,6 +28,7 @@
  */
 
 #include <time.h>
+#include <hiredis/hiredis.h>
 #include "backends.h"
 #include "cache.h"
 

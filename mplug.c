@@ -35,7 +35,6 @@
 #include <mosquitto_plugin.h>
 #include <fnmatch.h>
 #include <time.h>
-#include <hiredis/hiredis.h>
 
 #include "log.h"
 #include "hash.h"
