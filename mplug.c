@@ -353,14 +353,31 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	char *backend_name = NULL;
 	int match = 0, authorized = FALSE, nord;
 	int granted = MOSQ_ERR_ACL_DENIED;
+	char *useronly;
+
+	/*
+	 * For Traction, we strip out the device name from "user|device"
+	 */
+
+	useronly = (char *)username;
+
+	if (useronly && *useronly) {
+		char *p;
+
+		useronly = strdup(username);
+		if ((p = strchr(useronly, '|')) != NULL) {
+			*p = 0;
+		}
+	}
 
 	if (!username || !*username) { 	// anonymous users
-		username = ud->anonusername;
+		useronly = strdup(ud->anonusername);
 	}
+
 
 	_log(DEBUG, "mosquitto_auth_acl_check(..., %s, %s, %s, %s)",
 		clientid ? clientid : "NULL",
-		username ? username : "NULL",
+		useronly ? useronly : "NULL",
 		topic ? topic : "NULL",
 		access == MOSQ_ACL_READ ? "MOSQ_ACL_READ" : "MOSQ_ACL_WRITE" );
 
@@ -369,18 +386,18 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	 * so we refresh the user's auth status in Redis, to keep the TTL alive.
 	 */
 
-	redis_authenticated(ud->redis, 1, username);
+	redis_authenticated(ud->redis, 1, useronly);
 
-	granted = cache_q(clientid, username, topic, access, userdata);
+	granted = cache_q(clientid, useronly, topic, access, userdata);
 	if (granted != MOSQ_ERR_UNKNOWN) {
 		_log(DEBUG, "aclcheck(%s, %s, %d) CACHEDAUTH: %d",
-			username, topic, access, granted);
+			useronly, topic, access, granted);
 
-		redis_acl(ud->redis, granted, clientid, username, topic);
+		redis_acl(ud->redis, granted, clientid, useronly, topic);
 		return (granted);
 	}
 
-	if (!username || !*username || !topic || !*topic) {
+	if (!useronly || !*useronly || !topic || !*topic) {
 		granted =  MOSQ_ERR_ACL_DENIED;
 		goto outout;
 	}
@@ -389,9 +406,9 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	/* Check for usernames exempt from ACL checking, first */
 
 	if (ud->superusers) {
-		if (fnmatch(ud->superusers, username, 0) == 0) {
+		if (fnmatch(ud->superusers, useronly, 0) == 0) {
 			_log(DEBUG, "aclcheck(%s, %s, %d) GLOBAL SUPERUSER=Y",
-				username, topic, access);
+				useronly, topic, access);
 			granted = MOSQ_ERR_SUCCESS;
 			goto outout;
 		}
@@ -400,10 +417,10 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	for (bep = ud->be_list; bep && *bep; bep++) {
 		struct backend_p *b = *bep;
 
-		match = b->superuser(b->conf, username);
+		match = b->superuser(b->conf, useronly);
 		if (match == 1) {
 			_log(DEBUG, "aclcheck(%s, %s, %d) SUPERUSER=Y by %s",
-				username, topic, access, b->name);
+				useronly, topic, access, b->name);
 			granted = MOSQ_ERR_SUCCESS;
 			goto outout;
 		}
@@ -427,7 +444,7 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 
 	/* FIXME: |-- user bridge was authenticated in back-end 16 (<nil>)  */
 	_log(LOG_NOTICE, "user %s was authenticated in back-end %d (%s)",
-		username, nord, (backend_name) ? backend_name : "<nil>");
+		useronly, nord, (backend_name) ? backend_name : "<nil>");
 
 
 	bep = &ud->be_list[nord];
@@ -437,21 +454,23 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	}
 
 
-	match = (*bep)->aclcheck((*bep)->conf, clientid, username, topic, access);
+	match = (*bep)->aclcheck((*bep)->conf, clientid, useronly, topic, access);
 	if (match == 1) {
 		authorized = TRUE;
 	}
 
 	_log(DEBUG, "aclcheck(%s, %s, %d) AUTHORIZED=%d by %s",
-		username, topic, access, authorized, backend_name);
+		useronly, topic, access, authorized, backend_name);
 
 	granted = (authorized) ?  MOSQ_ERR_SUCCESS : MOSQ_ERR_ACL_DENIED;
 
    outout:	/* goto fail goto fail */
 
-	redis_acl(ud->redis, granted, clientid, username, topic);
+	redis_acl(ud->redis, granted, clientid, useronly, topic);
 
-	acl_cache(clientid, username, topic, access, granted, userdata);
+	acl_cache(clientid, useronly, topic, access, granted, userdata);
+	if (useronly && *useronly)
+		free(useronly);
 	return (granted);
 	
 }
