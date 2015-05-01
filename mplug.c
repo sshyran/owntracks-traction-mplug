@@ -35,6 +35,7 @@
 #include <mosquitto_plugin.h>
 #include <fnmatch.h>
 #include <time.h>
+#include <hiredis/hiredis.h>
 
 #include "log.h"
 #include "hash.h"
@@ -45,6 +46,7 @@
 #include "userdata.h"
 #include "cache.h"
 
+#define TTL		60	/* Authenticated user marked for n secs in Redis */
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 
@@ -89,6 +91,7 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 	int ret = MOSQ_ERR_SUCCESS;
 	int nord;
 	struct backend_p **bep;
+	struct timeval timeout = { 2, 50000 }; // 2.5 seconds
 #ifdef BE_PSK
 	struct backend_p **pskbep;
 	char *psk_database = NULL;
@@ -110,6 +113,20 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 	ud->anonusername = strdup("anonymous");
 	ud->cacheseconds = 300;
 	ud->aclcache = NULL;
+	ud->redis = redisConnectWithTimeout("localhost", 6379, timeout);
+
+	// FIXME: and if the connection goes down?
+        if (ud->redis == NULL || ud->redis->err) {
+                if (ud->redis) {
+                        printf("Connection error to Redis: %s\n", ud->redis->errstr);
+                        redisFree(ud->redis);
+			ud->redis = NULL;
+                } else {
+                        printf("Connection error: can't allocate redis context\n");
+                }
+                exit(1);
+        }
+
 
 	/*
 	 * Shove all options Mosquitto gives the plugin into a hash,
@@ -211,6 +228,34 @@ int mosquitto_auth_plugin_init(void **userdata, struct mosquitto_auth_opt *auth_
 	return (ret);
 }
 
+static void redis_authenticated(redisContext *redis, int authenticated, const char *username)
+{
+        redisReply *r;
+	char *perm = (authenticated) ? "PERMIT" : "DENY";
+
+
+        r = redisCommand(redis, "INCR mplug-auth:%s:%s", perm, username);
+        freeReplyObject(r);
+
+        r = redisCommand(redis, "EXPIRE mplug-auth:%s:%s %d", perm, username, TTL);
+        freeReplyObject(r);
+}
+
+
+static void redis_acl(redisContext *redis, int granted, const char *clientid, const char *username, const char *topic)
+{
+        redisReply *r;
+	char *grant = (granted == 0) ? "PERMIT" : "DENY";
+
+
+        r = redisCommand(redis, "HMSET mplug-acl:%s grant %s client %s topic %s",
+		username, grant, clientid, topic);
+        freeReplyObject(r);
+
+        r = redisCommand(redis, "EXPIRE mplug-acl:%s %d", username, TTL);
+        freeReplyObject(r);
+}
+
 int mosquitto_auth_plugin_cleanup(void *userdata, struct mosquitto_auth_opt *auth_opts, int auth_opt_count)
 {
 	struct userdata *ud = (struct userdata *)userdata;
@@ -297,6 +342,8 @@ int mosquitto_auth_unpwd_check(void *userdata, const char *username, const char 
 		free(phash);
 	}
 
+	redis_authenticated(ud->redis, authenticated, username);
+
 	return (authenticated) ? MOSQ_ERR_SUCCESS : MOSQ_ERR_AUTH;
 }
 
@@ -318,11 +365,19 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 		topic ? topic : "NULL",
 		access == MOSQ_ACL_READ ? "MOSQ_ACL_READ" : "MOSQ_ACL_WRITE" );
 
+	/*
+	 * Mosquitto guarantees that at the point the user has been authenticated,
+	 * so we refresh the user's auth status in Redis, to keep the TTL alive.
+	 */
+
+	redis_authenticated(ud->redis, 1, username);
 
 	granted = cache_q(clientid, username, topic, access, userdata);
 	if (granted != MOSQ_ERR_UNKNOWN) {
 		_log(DEBUG, "aclcheck(%s, %s, %d) CACHEDAUTH: %d",
 			username, topic, access, granted);
+
+		redis_acl(ud->redis, granted, clientid, username, topic);
 		return (granted);
 	}
 
@@ -394,6 +449,8 @@ int mosquitto_auth_acl_check(void *userdata, const char *clientid, const char *u
 	granted = (authorized) ?  MOSQ_ERR_SUCCESS : MOSQ_ERR_ACL_DENIED;
 
    outout:	/* goto fail goto fail */
+
+	redis_acl(ud->redis, granted, clientid, username, topic);
 
 	acl_cache(clientid, username, topic, access, granted, userdata);
 	return (granted);
